@@ -46,7 +46,7 @@ def is_valid_party_name(name):
     
     # Skip common unwanted terms
     unwanted_terms = ["ATTN", "PAYMENT", "PAY", "F", "H", "HDFC", "ICICI", "SBI", "AXIS", "YES", "BANK", 
-                     "BANQUE", "LIMITED", "LTD", "PVT", "PRIVATE", "CO", "COMPANY", "CORP", "CORPORATION",
+                     "BANQUE",
                      "BULD", "BANK", "HDFC BANK", "KOTAK MAHINDRA BANK", "MAHINDRA BANK"]
     if name_upper in unwanted_terms:
         return False
@@ -79,8 +79,7 @@ def clean_party_name(name):
     cleaned = re.sub(r'\b\d{1,2}\s+[A-Z]{3,9}\b', '', cleaned, flags=re.IGNORECASE)
     
     # Remove common bank names and unwanted terms
-    bank_names = ['HDFC', 'ICICI', 'SBI', 'AXIS', 'YES', 'BANK', 'BANQUE', 'LIMITED', 
-                 'LTD', 'PVT', 'PRIVATE', 'CO', 'COMPANY', 'CORP', 'CORPORATION',
+    bank_names = ['HDFC', 'ICICI', 'SBI', 'AXIS', 'YES', 'BANK', 'BANQUE', 
                  'ATTN', 'PAYMENT', 'PAY', 'BULD', 'KOTAK', 'MAHINDRA', 'HDFC BANK',
                  'KOTAK MAHINDRA BANK', 'MAHINDRA BANK']
     for bank in bank_names:
@@ -199,7 +198,7 @@ def parse_axis_particulars_improved(particulars):
 # Bank selection dropdown
 bank_option = st.selectbox(
     "Select Bank",
-    ["ICICI", "AXIS"],
+    ["ICICI Yearly", "ICICI Monthly", "AXIS"],
     help="Choose your bank to process the statement"
 )
 
@@ -208,7 +207,7 @@ uploaded_file = st.file_uploader(f"Upload {bank_option} Bank Statement (Excel)",
 if uploaded_file:
     st.success("File uploaded successfully!")
     
-    if bank_option == "ICICI":
+    if bank_option == "ICICI Yearly":
         # ICICI BANK PROCESSING (Your existing code)
         # Read Excel starting row 15 for ICICI
         header_row = 14
@@ -377,6 +376,193 @@ if uploaded_file:
             "Party Name2"
         ]
         df = df[[c for c in cols_order if c in df.columns]]
+# ------------------------------------------------------------------------------------------------------------------------------------------------------------
+    elif bank_option == "ICICI Monthly":
+        # ICICI Monthly processing - REPLICATING YEARLY LOGIC
+        header_row = 14
+        df = pd.read_excel(uploaded_file, header=None, skiprows=header_row + 1, dtype=str)
+        df = df.dropna(how='all')
+
+        # Set column names for ICICI Monthly (different from yearly)
+        df.columns = [
+            "No.",
+            "Transaction ID", 
+            "Value Date",
+            "Txn Posted Date",
+            "ChequeNo.",
+            "Description",  # This is equivalent to "Transaction Remarks" in yearly
+            "Cr/Dr",
+            "Transaction Amount(INR)", 
+            "Available Balance(INR)"
+        ]
+
+        # Replace hyphens with slashes for uniformity (same as yearly)
+        df["Description"] = df["Description"].astype(str).str.replace("-", "/", regex=False)
+
+        # Format dates (same as yearly but with monthly column names)
+        date_cols = ["Value Date", "Txn Posted Date"]
+        for col in date_cols:
+            df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y')
+
+        # Debit/Credit - ADAPTED FROM YEARLY
+        def debit_credit_monthly(row):
+            if row["Cr/Dr"] and str(row["Cr/Dr"]).strip().upper() == "CR":
+                return "Credit"
+            elif row["Cr/Dr"] and str(row["Cr/Dr"]).strip().upper() == "DR":
+                return "Debit"
+            else:
+                return ""
+
+        df["Debit/Credit"] = df.apply(debit_credit_monthly, axis=1)
+
+        # Parse Payment Category & Party Names - USING SAME LOGIC AS YEARLY
+        def parse_description_monthly(description):
+            if pd.isna(description) or description.strip() == "":
+                return pd.Series(["", "", ""])
+            
+            description = description.strip()
+            description = description.replace(" /", "/").replace("/ ", "/")
+            description = re.sub(r"/+", "/", description)
+
+            # REJECT
+            if description.upper().startswith("REJECT"):
+                return pd.Series(["REJECT", "", ""])
+
+            parts = description.split("/")
+            txn_type = parts[0].upper()
+
+            party1 = ""
+            party2 = ""
+
+            # INF/INFT Transactions - SAME AS YEARLY
+            if txn_type in ["INF", "INFT"]:
+                # Handle INF/NEFT combined format
+                if len(parts) >= 2 and parts[1] in ["NEFT", "RTGS", "IMPS"]:
+                    # Format: INF/NEFT/REFERENCE/BANKCODE/PARTYNAME
+                    if len(parts) >= 5:
+                        # The party name is usually in the last part
+                        potential_party = parts[-1]
+                        if is_valid_party_name(potential_party):
+                            party1 = potential_party
+                            party2 = potential_party
+                        else:
+                            # If last part is not valid, try to find a valid party name in other parts
+                            for i in range(4, len(parts)):
+                                if is_valid_party_name(parts[i]):
+                                    party1 = parts[i]
+                                    party2 = parts[i]
+                                    break
+                else:
+                    # Original INF logic
+                    if len(parts) >= 4:
+                        party1 = parts[3]
+                        party2 = parts[-1]
+            
+            # TRF Transactions - SAME AS YEARLY
+            elif txn_type == "TRF":
+                if len(parts) >= 2:
+                    party1 = parts[1]  # This gets "MODI STORES" or "PARCHUNIWALES"
+                    party2 = party1
+            
+            # Cheque clearing - SAME AS YEARLY
+            elif txn_type == "CLG":
+                if len(parts) >= 2:
+                    party1 = parts[1]
+                    party2 = party1
+
+            # Cash deposits - SAME AS YEARLY
+            elif "CASH" in txn_type:
+                if len(parts) >= 2:
+                    party2 = parts[-1]
+
+            # MMT/IMPS Transactions - SAME AS YEARLY
+            elif txn_type == "MMT":
+                # Handle MMT/IMPS format specifically
+                if "IMPS" in description.upper():
+                    imps_parts = description.split("/")
+                    # Look for meaningful party names in the parts
+                    for i in range(len(imps_parts)):
+                        part = imps_parts[i]
+                        if is_valid_party_name(part):
+                            party1 = part
+                            party2 = part
+                            break
+                
+                # If no party found in MMT/IMPS, use the original logic
+                if not party1 and len(parts) >= 3:
+                    for i in range(2, len(parts)):
+                        current_part = parts[i]
+                        if is_valid_party_name(current_part):
+                            party1 = current_part
+                            party2 = current_part
+                            break
+
+            # NEFT, RTGS, IMPS, CMS - SAME AS YEARLY
+            elif txn_type in ["NEFT", "RTGS", "IMPS", "CMS"]:
+                if len(parts) >= 3:
+                    for i in range(2, len(parts)):
+                        current_part = parts[i]
+                        if is_valid_party_name(current_part):
+                            party1 = current_part
+                            party2 = current_part
+                            break
+
+            # Cleanup empty or placeholder names - SAME AS YEARLY
+            party1 = clean_party_name(party1)
+            party2 = clean_party_name(party2)
+
+            # Map Payment Category - SAME AS YEARLY
+            payment_category_map = {
+                "CLG": "CHEQUE CLEARING",
+                "CASH": "CASH DEPOSIT",
+                "INF": "INF TRANSACTION",
+                "INFT": "INF TRANSACTION",
+                "TRF": "TRANSFER",
+                "MMT": "MOBILE MONEY TRANSFER",
+                "NEFT": "NEFT",
+                "RTGS": "RTGS",
+                "IMPS": "IMPS"
+            }
+            payment_category = payment_category_map.get(txn_type, txn_type)
+
+            return pd.Series([payment_category, party1, party2])
+
+        # Apply the parsing function to Description column
+        df[["Payment Category", "Party Name1", "Party Name2"]] = df["Description"].apply(parse_description_monthly)
+
+        # Create Withdrawal/Deposit columns from Transaction Amount based on Cr/Dr
+        def get_withdrawal_deposit(row):
+            amount_str = str(row["Transaction Amount(INR)"]).strip()
+            amount = clean_amount(amount_str)
+            
+            if row["Debit/Credit"] == "Debit":
+                return pd.Series([amount, "0"])  # Withdrawal, Deposit
+            elif row["Debit/Credit"] == "Credit":
+                return pd.Series(["0", amount])  # Withdrawal, Deposit
+            else:
+                return pd.Series(["0", "0"])
+
+        df[["Withdrawal Amt (INR)", "Deposit Amt (INR)"]] = df.apply(get_withdrawal_deposit, axis=1)
+
+        # Reorder columns to match yearly format
+        cols_order = [
+            "No.",
+            "Transaction ID",
+            "Value Date", 
+            "Txn Posted Date",
+            "ChequeNo.",
+            "Description",
+            "Withdrawal Amt (INR)",
+            "Deposit Amt (INR)", 
+            "Available Balance(INR)",
+            "Debit/Credit",
+            "Payment Category",
+            "Party Name1",
+            "Party Name2"
+        ]
+        df = df[[c for c in cols_order if c in df.columns]]
+
+   
 
     elif bank_option == "AXIS":
         # AXIS BANK PROCESSING - IMPROVED
@@ -492,10 +678,13 @@ if uploaded_file:
 
         # Show sample of extracted party names for verification
         st.subheader("Sample Party Name Extraction")
-        if bank_option == "ICICI":
+        if bank_option == "ICICI Yearly":
             sample_cols = ["Transaction Remarks", "Party Name1", "Party Name2"]
+        elif bank_option == "ICICI Monthly":
+            sample_cols = ["Description", "Party Name1", "Party Name2"]
         else:  # AXIS
             sample_cols = ["Particulars", "Party Name1", "Party Name2"]
+
         
         sample_data = df[sample_cols].head(10)
         st.dataframe(sample_data)
@@ -514,3 +703,5 @@ if uploaded_file:
         )
     else:
         st.warning("No data processed. Please check your file format.")
+
+            
